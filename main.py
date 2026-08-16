@@ -137,7 +137,7 @@ telegram_gate = TelegramGate()
 # ==========================================================================
 WS_URL = "wss://dga.pragmaticplaylive.net/ws"
 
-TABLE_KEY = "204"  # Mega Roulette
+TABLE_KEY = "2234"  # Mega Roulette
 CURRENCY = "EUR"
 CASINO_ID = "il9srgw4dna22222"
 
