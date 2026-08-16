@@ -57,8 +57,24 @@ if not os.path.exists(CSV_FILE):
         writer.writerow(CSV_HEADERS)
 
 
+def parse_table_time(spin_time_str):
+    """Convertit le format fourni par la table ('Aug 15, 2026 7:27:31 PM')
+    en ISO8601 ('2026-08-15 19:27:31'), pour rester compatible avec les
+    scripts de backtest qui lisent le CSV en pd.to_datetime(format='ISO8601')."""
+    if not spin_time_str:
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        dt = datetime.strptime(spin_time_str, "%b %d, %Y %I:%M:%S %p")
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        # Format inattendu (déjà ISO, ou autre table) — on garde tel quel
+        # plutôt que de faire planter le bot.
+        print(f"[CSV] ⚠️ Format de date inattendu, gardé tel quel : {spin_time_str!r}")
+        return spin_time_str
+
+
 def log_spin_to_csv(game_id, result, color, spin_time=None):
-    timestamp = spin_time if spin_time else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    timestamp = parse_table_time(spin_time)
     row = [timestamp, game_id, result, color]
     with open(CSV_FILE, mode='a', newline='') as f:
         writer = csv.writer(f)
@@ -80,11 +96,48 @@ def send_telegram_alert(message: str):
 
 
 # ==========================================================================
+# 1bis. FILTRE TELEGRAM : ne relaie que les 2 signaux suivant un BUST
+# ==========================================================================
+class TelegramGate:
+    """
+    - Un message 🚨 (bust OU fin de séquence par épuisement des 4 vies) est
+      TOUJOURS relayé vers Telegram, et arme les DEUX prochains signaux
+      complets (⚡ ... jusqu'à leur ✅/🚨 de fin) pour relais intégral.
+    - Tant que 'signals_to_relay' > 0, TOUT (⏳ alerte précoce, ⚡ signal,
+      🟢 gain, ✅/🚨 fin) est relayé.
+    - Dès que le 2e signal armé se termine, le compteur retombe à 0 et le
+      bot redevient silencieux sur Telegram jusqu'au prochain 🚨.
+    - Avant le tout premier bust de la session : silence total sur Telegram
+      (à part le message de démarrage du bot).
+    """
+    def __init__(self):
+        self.signals_to_relay = 0
+
+    def should_relay(self, msg: str) -> bool:
+        is_bust = msg.startswith("🚨")
+        is_completion = msg.startswith("✅") or is_bust
+
+        if is_bust:
+            self.signals_to_relay = 2
+            return True
+
+        if self.signals_to_relay > 0:
+            if is_completion:
+                self.signals_to_relay -= 1
+            return True
+
+        return False
+
+
+telegram_gate = TelegramGate()
+
+
+# ==========================================================================
 # 2. CONFIGURATION WEBSOCKET + PROXY RÉSIDENTIEL
 # ==========================================================================
 WS_URL = "wss://dga.pragmaticplaylive.net/ws"
 
-TABLE_KEY = "2244"
+TABLE_KEY = "204"  # Mega Roulette
 CURRENCY = "EUR"
 CASINO_ID = "il9srgw4dna22222"
 
@@ -283,8 +336,9 @@ def handle_new_result(number, table_id):
     events = engine.process_spin(number)
     t1 = time.time()
     for msg in events:
-        send_telegram_alert(msg)
-        print(msg)
+        print(msg)  # toujours visible en console/logs, peu importe Telegram
+        if telegram_gate.should_relay(msg):
+            send_telegram_alert(msg)
     t2 = time.time()
     print(f"[TIMING] engine={t1-t0:.3f}s | telegram={t2-t1:.3f}s | total={t2-t0:.3f}s")
 
@@ -355,7 +409,8 @@ def on_open(ws):
     print("[WS] Connexion établie.")
     send_telegram_alert(
         f"🎲 Bot LOW/HIGH démarré (WebSocket). Capital : {engine.initial_capital} DHS, "
-        f"seuil : {engine.chaos_threshold}, paliers : {engine.bet_ladder}."
+        f"seuil : {engine.chaos_threshold}, paliers : {engine.bet_ladder}.\n"
+        f"Telegram : silencieux jusqu'au prochain BUST, puis relaie les 2 signaux suivants."
     )
 
     msg1 = json.dumps({"type": "available", "casinoId": CASINO_ID})
